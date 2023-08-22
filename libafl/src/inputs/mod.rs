@@ -6,6 +6,9 @@ pub use bytes::BytesInput;
 pub mod encoded;
 pub use encoded::*;
 
+pub mod token;
+pub use token::*;
+
 pub mod gramatron;
 pub use gramatron::*;
 
