@@ -10,9 +10,7 @@ pub mod token_mutations;
 use serde::{Deserialize, Serialize};
 pub use token_mutations::*;
 pub mod encoded_mutations;
-pub mod token_input_mutations;
 pub use encoded_mutations::*;
-pub use token_input_mutations::*;
 pub mod mopt_mutator;
 pub use mopt_mutator::*;
 pub mod gramatron;
@@ -25,10 +23,14 @@ pub use tuneable::*;
 #[cfg(feature = "nautilus")]
 pub mod nautilus;
 use alloc::vec::Vec;
+#[cfg(feature = "tokens")]
+pub mod token_input_mutations;
 
 use libafl_bolts::{tuples::HasConstLen, Named};
 #[cfg(feature = "nautilus")]
 pub use nautilus::*;
+#[cfg(feature = "tokens")]
+pub use token_input_mutations::*;
 
 use crate::{corpus::CorpusId, Error};
 

@@ -1,4 +1,4 @@
-//! mutations similar to the ones in https://www.usenix.org/system/files/sec21-salls.pdf
+//! mutations similar to the ones in <https://www.usenix.org/system/files/sec21-salls.pdf>
 
 use alloc::vec::Vec;
 use core::ops::{Add, Range};
@@ -129,8 +129,8 @@ where
             return Ok(MutationResult::Skipped);
         };
 
-        for tok in input.tokens_mut()[region].iter_mut() {
-            tok.replace_rand_similar(state.rand_mut())
+        for tok in &mut input.tokens_mut()[region] {
+            tok.replace_rand_similar(state.rand_mut());
         }
 
         Ok(MutationResult::Mutated)
@@ -140,7 +140,7 @@ where
 /// a helper function to search for closing bracket
 #[inline]
 fn locate_cl_br<T: Token>(cl_br: &T, buf: &[T]) -> Option<usize> {
-    buf.into_iter().position(|tok| tok == cl_br)
+    buf.iter().position(|tok| tok == cl_br)
 }
 /// delete a Token from the input
 #[derive(Debug, Default)]
@@ -162,7 +162,7 @@ where
             return Ok(MutationResult::Skipped);
         };
 
-        for tok in input.tokens_mut()[region].iter_mut() {
+        for tok in &mut input.tokens_mut()[region] {
             *tok = T::new_rand(state.rand_mut());
         }
 
@@ -194,7 +194,7 @@ where
             let off2: usize = rand.next().try_into().unwrap();
             let range = core::cmp::min(off1, off2)..core::cmp::max(off1, off2);
 
-            for val in input.tokens_mut()[range].iter_mut() {
+            for val in &mut input.tokens_mut()[range] {
                 *val = T::new_rand(rand);
             }
 
@@ -228,7 +228,7 @@ where
             let off2: usize = rand.below(len).try_into().unwrap();
             let range = core::cmp::min(off1, off2)..core::cmp::max(off1, off2);
 
-            for val in input.tokens_mut()[range].iter_mut() {
+            for val in &mut input.tokens_mut()[range] {
                 val.replace_rand_similar(rand);
             }
 
@@ -424,7 +424,7 @@ where
 
 fn rand_region<T: Clone + Token>(rand: &mut impl Rand, input: &[T]) -> Option<Range<usize>> {
     let op_brs = input
-        .into_iter()
+        .iter()
         .enumerate()
         .filter_map(|(idx, token)| <T as Token>::closing_bracket(token).map(|tok| (tok, idx)))
         // TODO: avoid allocating here
@@ -436,9 +436,5 @@ fn rand_region<T: Clone + Token>(rand: &mut impl Rand, input: &[T]) -> Option<Ra
     let (cl_br, op_br_idx) = rand.choose(op_brs);
 
     let cl_br_idx = locate_cl_br(cl_br, &input[op_br_idx..]).map(|idx| idx.add(op_br_idx));
-    if let Some(cl_br_idx) = cl_br_idx {
-        Some(op_br_idx..cl_br_idx)
-    } else {
-        None
-    }
+    cl_br_idx.map(|cl_br_idx| op_br_idx..cl_br_idx)
 }

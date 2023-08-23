@@ -6,7 +6,9 @@ pub use bytes::BytesInput;
 pub mod encoded;
 pub use encoded::*;
 
+#[cfg(feature = "tokens")]
 pub mod token;
+#[cfg(feature = "tokens")]
 pub use token::*;
 
 pub mod gramatron;

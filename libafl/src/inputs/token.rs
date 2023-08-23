@@ -1,4 +1,4 @@
-//! Token inputs more faithful to https://www.usenix.org/system/files/sec21-salls.pdf than [`EncodedInputs`]
+//! Token inputs less faithful to <https://www.usenix.org/system/files/sec21-salls.pdf> than [`EncodedInputs`]
 
 use alloc::{string::String, vec::Vec};
 use core::{
@@ -10,10 +10,17 @@ use ahash::RandomState;
 use libafl_bolts::{prelude::OwnedSlice, rands::Rand, HasLen};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use super::{HasTargetBytes, Input};
+use super::{BytesInput, HasTargetBytes, Input, UsesInput};
+use crate::{
+    corpus::{CorpusId, Testcase},
+    prelude::HasCorpus,
+    stages::mutational::{MutatedTransform, MutatedTransformPost},
+};
 
 /// a Token
 pub trait Token: Debug + Clone + Hash + Serialize + DeserializeOwned + PartialEq {
+    /// the lexer for this Token Type
+    type Lex: Lexer<Token = Self>;
     /// create a new random token
     fn new_rand(rand: &mut impl Rand) -> Self;
     /// replace the token with a similar one
@@ -28,6 +35,16 @@ pub trait Token: Debug + Clone + Hash + Serialize + DeserializeOwned + PartialEq
     fn closing_bracket(&self) -> Option<&Self> {
         None
     }
+}
+
+/// a Lexer
+pub trait Lexer: Sized {
+    /// the tokens this lexer produces
+    type Token: Token<Lex = Self>;
+    /// lex the given source into Tokens
+    /// ignoring any errors we encounter
+    /// this should never panic
+    fn lex(src: &[u8]) -> Vec<Self::Token>;
 }
 
 /// a Token input
@@ -72,7 +89,7 @@ impl<T: Clone> TokenInput<T> {
 
     #[inline]
     pub(crate) fn extend_from_slice(&mut self, other: &[T]) {
-        self.tokens.extend_from_slice(other)
+        self.tokens.extend_from_slice(other);
     }
 }
 
@@ -81,7 +98,7 @@ impl<T: Token> Input for TokenInput<T> {
     fn generate_name(&self, _idx: usize) -> String {
         let mut hasher = RandomState::with_seeds(0, 0, 0, 0).build_hasher();
         for code in &self.tokens {
-            hasher.write(&code.as_bytes());
+            hasher.write(code.as_bytes());
         }
         format!("{:016x}", hasher.finish())
     }
@@ -98,8 +115,35 @@ impl<T: Token> HasTargetBytes for TokenInput<T> {
     fn target_bytes(&self) -> OwnedSlice<u8> {
         let mut bytes = vec![];
         for token in self.tokens() {
-            bytes.extend_from_slice(token.as_bytes())
+            bytes.extend_from_slice(token.as_bytes());
         }
         OwnedSlice::from(bytes)
     }
 }
+
+impl<S, T, Lex> MutatedTransform<BytesInput, S> for TokenInput<T>
+where
+    S: HasCorpus + UsesInput<Input = BytesInput>,
+    T: Token<Lex = Lex>,
+    Lex: Lexer<Token = T>,
+{
+    type Post = Self;
+
+    fn try_transform_from(
+        base: &mut Testcase<BytesInput>,
+        state: &S,
+        _corpus_idx: CorpusId,
+    ) -> Result<Self, libafl_bolts::Error> {
+        let input = base.load_input(state.corpus())?;
+        Ok(TokenInput::new(T::Lex::lex(&input.bytes)))
+    }
+
+    fn try_transform_into(
+        self,
+        _state: &S,
+    ) -> Result<(BytesInput, Self::Post), libafl_bolts::Error> {
+        Ok((BytesInput::new(self.target_bytes().into()), self))
+    }
+}
+
+impl<S, T> MutatedTransformPost<S> for TokenInput<T> where S: HasCorpus {}
