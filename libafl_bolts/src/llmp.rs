@@ -827,12 +827,12 @@ where
     SP: ShMemProvider,
 {
     /// ID of this sender.
-    pub id: ClientId,
+    id: ClientId,
     /// Ref to the last message this sender sent on the last page.
     /// If null, a new page (just) started.
-    pub last_msg_sent: *const LlmpMsg,
+    last_msg_sent: *const LlmpMsg,
     /// A vec of page wrappers, each containing an initialized [`ShMem`]
-    pub out_shmems: Vec<LlmpSharedMap<SP::ShMem>>,
+    out_shmems: Vec<LlmpSharedMap<SP::ShMem>>,
     /// A vec of pages that we previously used, but that have served its purpose
     /// (no potential readers are left).
     /// Instead of freeing them, we keep them around to potentially reuse them later,
@@ -843,7 +843,7 @@ where
     /// The broker uses this feature.
     /// By keeping the message history around,
     /// new clients may join at any time in the future.
-    pub keep_pages_forever: bool,
+    keep_pages_forever: bool,
     /// True, if we allocatd a message, but didn't call [`Self::send()`] yet
     has_unsent_message: bool,
     /// The sharedmem provider to get new sharaed maps if we're full
@@ -876,6 +876,12 @@ where
             shmem_provider,
             unused_shmem_cache: vec![],
         })
+    }
+
+    /// ID of this sender.
+    #[must_use]
+    pub fn id(&self) -> ClientId {
+        self.id
     }
 
     /// Completely reset the current sender map.
@@ -1470,16 +1476,16 @@ where
     SP: ShMemProvider,
 {
     /// Client Id of this receiver
-    pub id: ClientId,
+    id: ClientId,
     /// Pointer to the last message received
-    pub last_msg_recvd: *const LlmpMsg,
+    last_msg_recvd: *const LlmpMsg,
     /// Time we received the last message from this receiver
     #[cfg(feature = "std")]
     last_msg_time: Duration,
     /// The shmem provider
-    pub shmem_provider: SP,
+    shmem_provider: SP,
     /// current page. After EOP, this gets replaced with the new one
-    pub current_recv_shmem: LlmpSharedMap<SP::ShMem>,
+    current_recv_shmem: LlmpSharedMap<SP::ShMem>,
     /// Caches the highest msg id we've seen so far
     highest_msg_id: MessageId,
 }
@@ -1753,7 +1759,7 @@ where
 {
     /// Shmem containg the actual (unsafe) page,
     /// shared between one LlmpSender and one LlmpReceiver
-    pub shmem: SHM,
+    shmem: SHM,
 }
 
 // TODO: May be obsolete
@@ -1903,11 +1909,13 @@ where
     SP: ShMemProvider + 'static,
 {
     /// Broadcast map from broker to all clients
-    pub llmp_out: LlmpSender<SP>,
+    llmp_out: LlmpSender<SP>,
     /// Users of Llmp can add message handlers in the broker.
     /// This allows us to intercept messages right in the broker.
     /// This keeps the out map clean.
-    pub llmp_clients: Vec<LlmpReceiver<SP>>,
+    /// The backing values of `llmp_clients` [`ClientId`]s will always be sorted (but not gapless)
+    /// Make sure to always increase `num_clients_total` when pushing a new [`LlmpReceiver`] to  `llmp_clients`!
+    llmp_clients: Vec<LlmpReceiver<SP>>,
     /// The own listeners we spawned via `launch_listener` or `crate_attach_to_tcp`.
     /// Listeners will be ignored for `exit_cleanly_after` and they are never considered to have timed out.
     listeners: Vec<ClientId>,
@@ -1920,35 +1928,6 @@ where
     clients_to_remove: Vec<usize>,
     /// The ShMemProvider to use
     shmem_provider: SP,
-}
-
-#[inline]
-fn binary_search<SP: ShMemProvider>(
-    llmp_clients: &Vec<LlmpReceiver<SP>>,
-    client_id: ClientId,
-) -> Option<usize> {
-    if llmp_clients.is_empty() {
-        return None;
-    }
-
-    let mut left = 0;
-    let mut right = llmp_clients.len().checked_sub(1)?;
-
-    loop {
-        if left > right {
-            break;
-        }
-
-        let mid = left + (right - left) / 2;
-
-        match client_id {
-            id if id == llmp_clients[mid].id => return Some(llmp_clients[mid].id.0 as _),
-            id if id > llmp_clients[mid].id => left = mid + 1,
-            _ => right = mid.checked_sub(1).expect("invalid right edge"),
-        }
-    }
-
-    None
 }
 
 /// A signal handler for the [`LlmpBroker`].
@@ -2011,6 +1990,20 @@ where
         })
     }
 
+    /// Gets the [`ClientId`] the next client attaching to this broker will get.
+    /// In its current implememtation, the inner value of the next [`ClientId`]
+    /// is equal to `self.num_clients_total`.
+    /// Calling `peek_next_client_id` mutliple times (without adding a client) will yield the same value.
+    #[must_use]
+    #[inline]
+    pub fn peek_next_client_id(&self) -> ClientId {
+        ClientId(
+            self.num_clients_total
+                .try_into()
+                .expect("More than u32::MAX clients!"),
+        )
+    }
+
     /// Create a new [`LlmpBroker`] attaching to a TCP port
     #[cfg(feature = "std")]
     pub fn create_attach_to_tcp(shmem_provider: SP, port: u16) -> Result<Self, Error> {
@@ -2043,6 +2036,19 @@ where
         self.exit_cleanly_after = Some(n_clients);
     }
 
+    /// Add a client to this broker.
+    /// Will set an appropriate [`ClientId`] before pushing the client to the internal vec.
+    /// Will increase `num_clients_total`.
+    /// The backing values of `llmp_clients` [`ClientId`]s will always be sorted (but not gapless)
+    /// returns the [`ClientId`] of the new client.
+    pub fn add_client(&mut self, mut client_receiver: LlmpReceiver<SP>) -> ClientId {
+        let id = self.peek_next_client_id();
+        client_receiver.id = id;
+        self.llmp_clients.push(client_receiver);
+        self.num_clients_total += 1;
+        id
+    }
+
     /// Allocate the next message on the outgoing map
     unsafe fn alloc_next(&mut self, buf_len: usize) -> Result<*mut LlmpMsg, Error> {
         self.llmp_out.alloc_next(buf_len)
@@ -2055,9 +2061,8 @@ where
         // Since we now have a handle to it, it won't be umapped too early (only after we also unmap it)
         client_page.mark_safe_to_unmap();
 
-        let id = ClientId(self.num_clients_total.try_into().unwrap());
-        self.llmp_clients.push(LlmpReceiver {
-            id,
+        self.add_client(LlmpReceiver {
+            id: ClientId(0), // Will be auto-filled
             current_recv_shmem: client_page,
             last_msg_recvd: ptr::null_mut(),
             shmem_provider: self.shmem_provider.clone(),
@@ -2065,10 +2070,7 @@ where
             // We don't know the last received time, just assume the current time.
             #[cfg(feature = "std")]
             last_msg_time: current_time(),
-        });
-
-        self.num_clients_total += 1;
-        id
+        })
     }
 
     /// Connects to a broker running on another machine.
@@ -2119,7 +2121,7 @@ where
         // TODO: handle broker_ids properly/at all.
         let map_description = Self::b2b_thread_on(
             stream,
-            ClientId(self.llmp_clients.len() as u32),
+            self.peek_next_client_id(),
             &self
                 .llmp_out
                 .out_shmems
@@ -2606,7 +2608,7 @@ where
             hostname,
         };
 
-        let llmp_tcp_id = ClientId(self.llmp_clients.len() as u32);
+        let llmp_tcp_id = self.peek_next_client_id();
 
         // Tcp out map sends messages from background thread tcp server to foreground client
         let tcp_out_shmem = LlmpSharedMap::new(
@@ -2704,7 +2706,6 @@ where
         F: FnMut(ClientId, Tag, Flags, &[u8]) -> Result<LlmpMsgHookResult, Error>,
     {
         let mut new_messages = false;
-        let mut next_id = self.llmp_clients.len() as u32;
 
         // TODO: We could memcpy a range of pending messages, instead of one by one.
         loop {
@@ -2712,11 +2713,12 @@ where
                 let pos = if (client_id.0 as usize) < self.llmp_clients.len()
                     && self.llmp_clients[client_id.0 as usize].id == client_id
                 {
-                    // Fast path when no client was removed
+                    // Fast path when no client before this one was removed
                     client_id.0 as usize
                 } else {
-                    binary_search(&self.llmp_clients, client_id)
-                        .expect("Fatal error, client ID not found")
+                    self.llmp_clients
+                        .binary_search_by_key(&client_id, |x| x.id)
+                        .expect("Fatal error, client ID {client_id} not found in llmp_clients.")
                 };
                 let client = &mut self.llmp_clients[pos];
                 match client.recv()? {
@@ -2764,11 +2766,10 @@ where
                     ) {
                         Ok(new_shmem) => {
                             let mut new_page = LlmpSharedMap::existing(new_shmem);
-                            let id = next_id;
-                            next_id += 1;
                             new_page.mark_safe_to_unmap();
-                            self.llmp_clients.push(LlmpReceiver {
-                                id: ClientId(id),
+
+                            self.add_client(LlmpReceiver {
+                                id: ClientId(0), // will be auto-filled
                                 current_recv_shmem: new_page,
                                 last_msg_recvd: ptr::null_mut(),
                                 shmem_provider: self.shmem_provider.clone(),
@@ -2777,7 +2778,6 @@ where
                                 #[cfg(feature = "std")]
                                 last_msg_time: current_time(),
                             });
-                            self.num_clients_total += 1;
                         }
                         Err(e) => {
                             log::info!("Error adding client! Ignoring: {e:?}");
@@ -2796,11 +2796,12 @@ where
                     let pos = if (client_id.0 as usize) < self.llmp_clients.len()
                         && self.llmp_clients[client_id.0 as usize].id == client_id
                     {
-                        // Fast path when no client was removed
+                        // Fast path when no client before this one was removed
                         client_id.0 as usize
                     } else {
-                        binary_search(&self.llmp_clients, client_id)
-                            .expect("Fatal error, client ID not found")
+                        self.llmp_clients
+                            .binary_search_by_key(&client_id, |x| x.id)
+                            .expect("Fatal error, client ID {client_id} not found in llmp_clients.")
                     };
 
                     let map = &mut self.llmp_clients[pos].current_recv_shmem;
@@ -2823,9 +2824,9 @@ where
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct LlmpClientDescription {
     /// Description of the sender
-    pub sender: LlmpDescription,
+    sender: LlmpDescription,
     /// Description of the receiver
-    pub receiver: LlmpDescription,
+    receiver: LlmpDescription,
 }
 
 /// Client side of LLMP
@@ -2835,9 +2836,9 @@ where
     SP: ShMemProvider,
 {
     /// Outgoing channel to the broker
-    pub sender: LlmpSender<SP>,
+    sender: LlmpSender<SP>,
     /// Incoming (broker) broadcast map
-    pub receiver: LlmpReceiver<SP>,
+    receiver: LlmpReceiver<SP>,
 }
 
 /// `n` clients connect to a broker. They share an outgoing map with the broker,
@@ -2917,6 +2918,30 @@ where
                 &description.receiver,
             )?,
         })
+    }
+
+    /// Outgoing channel to the broker
+    #[must_use]
+    pub fn sender(&self) -> &LlmpSender<SP> {
+        &self.sender
+    }
+
+    /// Outgoing channel to the broker (mut)
+    #[must_use]
+    pub fn sender_mut(&mut self) -> &mut LlmpSender<SP> {
+        &mut self.sender
+    }
+
+    /// Incoming (broker) broadcast map
+    #[must_use]
+    pub fn receiver(&self) -> &LlmpReceiver<SP> {
+        &self.receiver
+    }
+
+    /// Incoming (broker) broadcast map (mut)
+    #[must_use]
+    pub fn receiver_mut(&mut self) -> &mut LlmpReceiver<SP> {
+        &mut self.receiver
     }
 
     /// Waits for the sender to be save to unmap.
