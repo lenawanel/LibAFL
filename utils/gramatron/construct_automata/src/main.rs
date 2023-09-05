@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{BufReader, Write},
     path::{Path, PathBuf},
@@ -67,7 +67,7 @@ struct Transition<'src> {
 #[derive(Default)]
 struct Stacks<'src> {
     pub q: Vec<Rc<VecDeque<&'src str>>>,
-    pub s: Vec<Box<[&'src str]>>,
+    pub s: HashMap<Box<[&'src str]>, usize>,
 }
 
 fn tokenize(rule: &str) -> (&str, Vec<&str>) {
@@ -138,16 +138,14 @@ fn prepare_transitions<'pda, 'src: 'pda>(
 
         // Check if a recursive transition state being created, if so make a backward
         // edge and don't add anything to the worklist
-        for (dest, stack) in state_stacks.s.iter().enumerate() {
-            if state_stack_sorted == *stack {
-                transition.dest = dest + 1;
-                // i += 1;
-                pda.push(transition);
+        if let Some(dest) = state_stacks.s.get(&state_stack_sorted) {
+            transition.dest = *dest;
+            // i += 1;
+            pda.push(transition);
 
-                // If a recursive transition exercised don't add the same transition as a new
-                // edge, continue onto the next transitions
-                continue 'rules_loop;
-            }
+            // If a recursive transition exercised don't add the same transition as a new
+            // edge, continue onto the next transitions
+            continue 'rules_loop;
         }
 
         // If the generated state has a stack size > stack_limit then that state is abandoned
@@ -168,7 +166,7 @@ fn prepare_transitions<'pda, 'src: 'pda>(
         // since each index corresponds to `state_count - 1`
         // index with `dest - 1`
         state_stacks.q.push(state_stack);
-        state_stacks.s.push(state_stack_sorted);
+        state_stacks.s.insert(state_stack_sorted, dest);
         pda.push(transition);
 
         println!("worklist size: {}", worklist.len());
